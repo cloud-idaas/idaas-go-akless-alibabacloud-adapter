@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master, "feature/**"]
+    branches: [main, "feature/**"]
   pull_request:
-    branches: [master]
+    branches: [main]
 
 permissions:
   contents: read
@@ -37,8 +37,11 @@ jobs:
         run: |
           # 固定版本保证可复现：@latest 随时间漂移，且新版 govulncheck 可能要求
           # 高于本 workflow 固定的 Go 版本，导致无代码变更时 CI 突然失败。
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-          govulncheck ./...
+          # 用 go run 直接执行：不依赖 GOPATH/bin 是否在 PATH 上（install+run
+          # 形态曾在 GitHub runner 上快速失败），且失败原因内联在 step 日志中。
+          go version
+          go env GOPROXY GOTOOLCHAIN
+          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
       - name: Build
         run: go build ./...
