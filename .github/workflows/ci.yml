@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [master, "feature/**"]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Go fmt check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Files need formatting:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Vulnerability scan (govulncheck)
+        run: |
+          # 固定版本保证可复现：@latest 随时间漂移，且新版 govulncheck 可能要求
+          # 高于本 workflow 固定的 Go 版本，导致无代码变更时 CI 突然失败。
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Build examples (verify API usage compiles)
+        # examples/ 下的每个示例是独立的 package main + 独立 func main()，不能用同一个 build
+        # tag 一起编译（会触发 main redeclared）。为每个示例分配独立 tag，逐个按 tag 编译，
+        # 既保证示例对上游 SDK 的 API 调用始终可编译、又不污染默认 go build ./...。
+        run: |
+          set -e
+          for ex in generic oss_v1 oss_v2 sls; do
+            echo ">>> building example_${ex}"
+            go build -tags="example_${ex}" -o /tmp/example_build_${ex} ./examples
+          done
+
+      - name: Test with coverage
+        run: |
+          go test ./... -race -coverprofile=coverage.out -covermode=atomic
+          go tool cover -func=coverage.out | tail -1
+          # Enforce minimum 80% coverage
+          # 注意：total 行以 "N%" 结尾，正则须带上 % 再剥离，否则 grep 无匹配
+          # 退出 1，在 Actions 默认的 bash -e 下会直接杀死本 step（门禁从未生效过）。
+          cov=$(go tool cover -func=coverage.out | tail -1 | grep -oE '[0-9.]+%$' | tr -d '%')
+          echo "Total coverage: ${cov}%"
+          if [ "$(echo "$cov < 80.0" | bc)" = "1" ]; then
+            echo "::error::Coverage ${cov}% is below 80% threshold"
+            exit 1
+          fi
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out

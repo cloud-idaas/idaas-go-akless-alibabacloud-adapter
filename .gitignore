@@ -1,0 +1,61 @@
+# ---- Go ----
+# 编译产物
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# 覆盖率 / 性能分析
+*.cover
+*.coverprofile
+coverage.txt
+coverage.html
+*.prof
+
+# Go module 本地代理缓存（一般不用提交）
+vendor/
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# ---- 操作系统 ----
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# ---- 项目相关 ----
+# 本地配置文件（含敏感凭证，禁止入库）
+*.local.json
+*-local.json
+client-config.json
+akless-config.json
+.cloud_idaas/
+# 仓库根目录的真实 IDaaS 配置（含真实实例/应用标识；密钥走环境变量。
+# 占位模板见 samples/cloud_idaas.json）
+/cloud_idaas.json
+
+# 环境变量文件
+.env
+.env.*
+!.env.example
+
+# 临时文件 / 日志
+*.log
+tmp/
+temp/
