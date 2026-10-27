@@ -18,7 +18,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          # 库下限与 CI 工具链解耦：go.mod 声明 go 1.22（消费者最低可用，1.20/1.22 runner
+          # 已实证依赖图可编译；1.18 被 klauspost zstd 的 binary.Append*（Go 1.19 API）否决）。
+          # 本 job 用 1.25 编译验证（语言档仍按 go.mod 1.22）；漏洞扫描见独立的 vuln-scan job。
+          go-version: "1.25"
           cache: true
 
       - name: Go fmt check
@@ -33,15 +36,6 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
-      - name: Vulnerability scan (govulncheck)
-        run: |
-          # 固定版本保证可复现：@latest 随时间漂移，且新版 govulncheck 可能要求
-          # 高于本 workflow 固定的 Go 版本，导致无代码变更时 CI 突然失败。
-          # 用 go run 直接执行：不依赖 GOPATH/bin 是否在 PATH 上（install+run
-          # 形态曾在 GitHub runner 上快速失败），且失败原因内联在 step 日志中。
-          go version
-          go env GOPROXY GOTOOLCHAIN
-          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
       - name: Build
         run: go build ./...
@@ -61,12 +55,11 @@ jobs:
         run: |
           go test ./... -race -coverprofile=coverage.out -covermode=atomic
           go tool cover -func=coverage.out | tail -1
-          # Enforce minimum 80% coverage
-          # 注意：total 行以 "N%" 结尾，正则须带上 % 再剥离，否则 grep 无匹配
-          # 退出 1，在 Actions 默认的 bash -e 下会直接杀死本 step（门禁从未生效过）。
-          cov=$(go tool cover -func=coverage.out | tail -1 | grep -oE '[0-9.]+%$' | tr -d '%')
+          # 提取 total 行末尾的百分比数值(形如 `42.3%`)。原正则 `[0-9.]+$` 因行尾是 `%`
+          # 而无法匹配,导致 cov 恒空、80% 门禁永远通过。用 awk 取最后一列再 strip `%`。
+          cov=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')
           echo "Total coverage: ${cov}%"
-          if [ "$(echo "$cov < 80.0" | bc)" = "1" ]; then
+          if [ "$(awk -v c="$cov" 'BEGIN{print (c+0 < 80) ? 1 : 0}')" = "1" ]; then
             echo "::error::Coverage ${cov}% is below 80% threshold"
             exit 1
           fi
@@ -77,3 +70,23 @@ jobs:
         with:
           name: coverage
           path: coverage.out
+
+  vuln-scan:
+    name: Vulnerability scan
+    # 与下限/构建 job 分离：stdlib 公告只在“最新受支持工具链”里被修复，钉死任何版本号
+    # 都会让扫描步骤随公告滚动而常红；构建兼容性由 test job 的 1.25（按 go.mod 1.22 语言档）
+    # 验证，漏洞扫描用最新 stable 工具链 + govulncheck@latest，保证判定与公告库同步。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache: false
+
+      - name: govulncheck
+        run: |
+          go version
+          go env GOPROXY GOTOOLCHAIN
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...

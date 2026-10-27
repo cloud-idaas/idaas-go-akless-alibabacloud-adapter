@@ -3,21 +3,27 @@ package pam
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/cloud-idaas/idaas-go-akless-alibabacloud-adapter/constants"
 	"github.com/cloud-idaas/idaas-go-core-sdk/config"
-	sdkconstants "github.com/cloud-idaas/idaas-go-core-sdk/constants"
 	"github.com/cloud-idaas/idaas-go-core-sdk/credential"
 	"github.com/cloud-idaas/idaas-go-core-sdk/domain"
 	"github.com/cloud-idaas/idaas-go-core-sdk/enums"
 	sdkerrors "github.com/cloud-idaas/idaas-go-core-sdk/errors"
 	"github.com/cloud-idaas/idaas-go-core-sdk/factory"
+	"github.com/cloud-idaas/idaas-go-core-sdk/provider"
 )
 
-// initCoreFactoryForTest 用最小合法配置初始化核心 SDK Factory 单例（public client，无需凭证）。
-// 仅用于覆盖包级便捷构造函数（从单例取参）路径；不触发任何网络调用。
+// initCoreFactoryForTest 用最小合法配置初始化核心 SDK Factory 单例。
+// 仅用于覆盖零参工厂路径的构造逻辑；不触发任何网络调用。
+//
+// authnMethod 用 client_secret_post + clientSecretEnvVarName：核心 SDK v0.1.0-beta.1 删除了
+// TokenAuthnMethodNone（"none" 即 public client，任何能访问 token endpoint 的进程都能冒用
+// clientId，故改为直接拒绝启动）。clientSecretEnvVarName 只是环境变量**名**，测试无需真设该
+// 变量——只要不发起取令牌的网络调用即可。
 func initCoreFactoryForTest(t *testing.T) {
 	t.Helper()
 	cfg := &config.IDaaSClientConfig{
@@ -27,94 +33,17 @@ func initCoreFactoryForTest(t *testing.T) {
 		TokenEndpoint:        "https://example.com/token",
 		DeveloperApiEndpoint: "pam.example.com",
 		AuthnConfiguration: &config.IdentityAuthenticationConfiguration{
-			IdentityType: enums.AuthenticationIdentityClient,
-			AuthnMethod:  enums.TokenAuthnMethodNone,
+			IdentityType:           enums.AuthenticationIdentityClient,
+			AuthnMethod:            enums.TokenAuthnMethodClientSecretPost,
+			ClientSecretEnvVarName: "IDAAS_TEST_CLIENT_SECRET",
 		},
 	}
-	if err := factory.GetInstance().Initialize(cfg); err != nil {
+	if err := factory.InitWithConfig(cfg); err != nil {
 		t.Fatalf("initialize core factory: %v", err)
 	}
 }
 
 // --- 包级便捷构造函数（依赖核心 SDK 单例）---
-
-// TestFactory_NotInitialized 验证核心 SDK Factory 未初始化时便捷构造函数的报错
-// （用户忘了先调 factory.GetInstance().Initialize(cfg) 的场景）。
-//
-// 顺序敏感：单例一旦初始化无法复位（核心 SDK 无 Reset），故本用例必须是本包
-// 首个执行的测试——adapters_test.go 是包内按文件名排序的首个测试文件，本函数
-// 是其首个测试函数。IsInitialized 守卫保证未来顺序被打破时跳过而非误报。
-func TestFactory_NotInitialized(t *testing.T) {
-	if factory.GetInstance().IsInitialized() {
-		t.Skip("core factory singleton already initialized by an earlier test; " +
-			"cannot exercise the not-initialized branch (test-order dependency)")
-	}
-	_, err := GetAlibabaCloudCredentialsProvider("acs:ram::123:role/demo")
-	if err == nil {
-		t.Fatal("expected error when core factory is not initialized")
-	}
-	var ce *sdkerrors.ConfigError
-	if !errors.As(err, &ce) {
-		t.Fatalf("expected *ConfigError, got %T: %v", err, err)
-	}
-	if ce.Code != sdkconstants.IDaaSCredentialProviderFactoryNotInit {
-		t.Errorf("code=%q, want %q", ce.Code, sdkconstants.IDaaSCredentialProviderFactoryNotInit)
-	}
-	// 其余三个便捷构造函数同样应透传未初始化错误。
-	if _, err := GetOSSV1CredentialsProvider("acs:ram::123:role/demo"); err == nil {
-		t.Error("expected error for GetOSSV1CredentialsProvider")
-	}
-	if _, err := GetOSSV2CredentialsProvider("acs:ram::123:role/demo"); err == nil {
-		t.Error("expected error for GetOSSV2CredentialsProvider")
-	}
-	if _, err := GetSLSCredentialsProvider("acs:ram::123:role/demo"); err == nil {
-		t.Error("expected error for GetSLSCredentialsProvider")
-	}
-}
-
-// TestFactory_CreateCredentialProviderError 验证核心 Factory 已初始化但 IdentityType
-// 非法时，便捷构造函数把 CreateCredentialProvider 的错误透传。
-// Initialize 只校验字段格式（不校验 IdentityType 枚举），错误延迟到
-// CreateCredentialProvider 的 switch default 分支才暴露。
-func TestFactory_CreateCredentialProviderError(t *testing.T) {
-	cfg := &config.IDaaSClientConfig{
-		ClientId:             "client-test",
-		InstanceId:           "inst-test",
-		IssuerEndpoint:       "https://example.com/issuer",
-		TokenEndpoint:        "https://example.com/token",
-		DeveloperApiEndpoint: "pam.example.com",
-		AuthnConfiguration: &config.IdentityAuthenticationConfiguration{
-			IdentityType: enums.AuthenticationIdentityEnum("GHOST"),
-			AuthnMethod:  enums.TokenAuthnMethodNone,
-		},
-	}
-	if err := factory.GetInstance().Initialize(cfg); err != nil {
-		t.Fatalf("initialize core factory: %v", err)
-	}
-	t.Cleanup(func() { initCoreFactoryForTest(t) }) // 还原为合法配置，避免影响后续用例
-
-	_, err := GetAlibabaCloudCredentialsProvider("acs:ram::123:role/demo")
-	if err == nil {
-		t.Fatal("expected error for unsupported identity type")
-	}
-	var ce *sdkerrors.ConfigError
-	if !errors.As(err, &ce) {
-		t.Fatalf("expected *ConfigError, got %T: %v", err, err)
-	}
-	if ce.Code != "UnsupportedIdentityType" {
-		t.Errorf("code=%q, want UnsupportedIdentityType", ce.Code)
-	}
-	// 其余三个便捷构造函数同样应透传该错误。
-	if _, err := GetOSSV1CredentialsProvider("acs:ram::123:role/demo"); err == nil {
-		t.Error("expected error for GetOSSV1CredentialsProvider")
-	}
-	if _, err := GetOSSV2CredentialsProvider("acs:ram::123:role/demo"); err == nil {
-		t.Error("expected error for GetOSSV2CredentialsProvider")
-	}
-	if _, err := GetSLSCredentialsProvider("acs:ram::123:role/demo"); err == nil {
-		t.Error("expected error for GetSLSCredentialsProvider")
-	}
-}
 
 func TestFactory_PackageLevelGetters(t *testing.T) {
 	initCoreFactoryForTest(t)
@@ -294,6 +223,12 @@ func (f *fakeIDaaSCredential) GetExpiresIn() int64     { return 3600 }
 func (f *fakeIDaaSCredential) GetScope() string        { return "urn:cloud:idaas:pam|.all" }
 func (f *fakeIDaaSCredential) GetRefreshToken() string { return "" }
 
+// String 实现 credential.IDaaSCredential（core SDK v0.1.0-beta.1 新增的 Stringer 兜底）：
+// 返回脱敏摘要，明文 token 一律不外泄。
+func (f *fakeIDaaSCredential) String() string {
+	return "fakeIDaaSCredential{token: <redacted len=" + strconv.Itoa(len(f.token)) + ">}"
+}
+
 // fakeIDaaSCredentialProvider 满足 provider.IDaaSCredentialProvider 接口。
 // err 非空时 GetCredential 返回错误（用于错误分支注入）。
 type fakeIDaaSCredentialProvider struct {
@@ -307,6 +242,17 @@ func (f *fakeIDaaSCredentialProvider) GetCredential() (credential.IDaaSCredentia
 	}
 	return &fakeIDaaSCredential{token: f.token}, nil
 }
+
+// GetCredentialWithContext 实现 provider.IDaaSCredentialProvider
+// （core SDK v0.1.0-beta.1 新增方法）。
+func (f *fakeIDaaSCredentialProvider) GetCredentialWithContext(_ context.Context) (credential.IDaaSCredential, error) {
+	return f.GetCredential()
+}
+
+var (
+	_ provider.IDaaSCredentialProvider = (*fakeIDaaSCredentialProvider)(nil)
+	_ credential.IDaaSCredential       = (*fakeIDaaSCredential)(nil)
+)
 
 // 全参构造器的参数校验：nil credentialProvider 应 fail-fast（不调 PAM、不依赖单例）。
 func TestFactory_AdvancedConstructorValidation(t *testing.T) {

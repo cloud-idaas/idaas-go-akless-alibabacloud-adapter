@@ -4,7 +4,7 @@
   "issuer": "https://your-idaas-instance.aliyunidaas.com/api/v2/<authorizationServerId>/oauth2",
   "tokenEndpoint": "https://your-idaas-instance.aliyunidaas.com/api/v2/<authorizationServerId>/oauth2/token",
   "scope": "urn:cloud:idaas:pam|cloud_account_role:obtain_access_credential",
-  "developerApiEndpoint": "eiam-developerapi.cn-hangzhou.aliyuncs.com",
+  "developerApiEndpoint": "eiam-developerapi.<region>.aliyuncs.com",
   "authnConfiguration": {
     "identityType": "CLIENT",
     "authnMethod": "CLIENT_SECRET_BASIC",

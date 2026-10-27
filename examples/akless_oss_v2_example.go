@@ -34,11 +34,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load IDaaS config: %v", err)
 	}
-	if err := factory.GetInstance().Initialize(idaasCfg); err != nil {
+	if err := factory.InitWithConfig(idaasCfg); err != nil {
 		log.Fatalf("Failed to initialize IDaaS: %v", err)
 	}
 
-	// 2. Create OSS V2 credentials provider via the package-level constructor.
+	// 2. Create OSS V2 credentials provider via factory.
 	credProvider, err := pam.GetOSSV2CredentialsProvider(roleArn)
 	if err != nil {
 		log.Fatalf("Failed to create OSS V2 credentials provider: %v", err)

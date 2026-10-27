@@ -32,11 +32,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load IDaaS config: %v", err)
 	}
-	if err := factory.GetInstance().Initialize(idaasCfg); err != nil {
+	if err := factory.InitWithConfig(idaasCfg); err != nil {
 		log.Fatalf("Failed to initialize IDaaS: %v", err)
 	}
 
-	// 2. Create SLS credentials provider via the package-level constructor.
+	// 2. Create SLS credentials provider via factory.
 	credProvider, err := pam.GetSLSCredentialsProvider(roleArn)
 	if err != nil {
 		log.Fatalf("Failed to create SLS credentials provider: %v", err)

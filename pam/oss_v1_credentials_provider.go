@@ -1,7 +1,7 @@
 package pam
 
 import (
-	"log/slog"
+	"context"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 )
@@ -35,8 +35,12 @@ func NewIDaaSPamOSSV1CredentialsProvider(p *IDaaSPamAlibabaCloudCredentialsProvi
 func (p *IDaaSPamOSSV1CredentialsProvider) GetCredentials() oss.Credentials {
 	cred, err := p.GetCredentialsE()
 	if err != nil {
-		slog.Warn("IDaaSPamOSSV1CredentialsProvider: get credentials failed; "+
-			"returning empty credentials (OSS V1 GetCredentials has no error return)",
+		// OSS V1 GetCredentials 无 ctx 参数，日志用 context.Background()。
+		// 复用底层 provider 经 WithLogger 注入的 logger（未注入时为核心 SDK
+		// 默认的 logger.Default()），与 refreshCredential 降级告警走同一日志实例。
+		p.provider.logger.Warn(context.Background(),
+			"IDaaSPamOSSV1CredentialsProvider: get credentials failed; "+
+				"returning empty credentials (OSS V1 GetCredentials has no error return)",
 			"error", err)
 		return &ossV1Credentials{}
 	}

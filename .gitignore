@@ -41,14 +41,13 @@ Desktop.ini
 
 # ---- 项目相关 ----
 # 本地配置文件（含敏感凭证，禁止入库）
+# 仓库根目录的真实 IDaaS 配置（集成测试用，含实例/应用 ID；密钥走 IDAAS_CLIENT_SECRET 环境变量）
+/cloud_idaas.json
 *.local.json
 *-local.json
 client-config.json
 akless-config.json
 .cloud_idaas/
-# 仓库根目录的真实 IDaaS 配置（含真实实例/应用标识；密钥走环境变量。
-# 占位模板见 samples/cloud_idaas.json）
-/cloud_idaas.json
 
 # 环境变量文件
 .env

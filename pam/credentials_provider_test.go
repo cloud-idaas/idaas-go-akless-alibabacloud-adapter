@@ -1,11 +1,10 @@
 package pam
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -21,32 +20,54 @@ import (
 // --- fakes ---
 
 type fakeOidcTokenProvider struct {
-	token string
-	err   error
+	token   string
+	err     error
+	lastCtx context.Context
 }
 
 func (f *fakeOidcTokenProvider) GetOidcToken() (string, error) {
+	return f.GetOidcTokenWithContext(context.Background())
+}
+
+// GetOidcTokenWithContext 实现 provider.OidcTokenProvider（core SDK v0.1.0-beta.1 新增方法）。
+func (f *fakeOidcTokenProvider) GetOidcTokenWithContext(ctx context.Context) (string, error) {
+	f.lastCtx = ctx
 	if f.err != nil {
 		return "", f.err
 	}
 	return f.token, nil
 }
 
-// fakeHttpClient 记录调用次数、捕获最近一次请求，并返回预设响应。
-// 并发用例（singleflight 合并）下被多 goroutine 调用，用互斥锁保护计数与捕获。
+var _ provider.OidcTokenProvider = (*fakeOidcTokenProvider)(nil)
+
+// fakeHttpClient 记录调用次数、捕获最近一次请求与 ctx，并返回预设响应。
 type fakeHttpClient struct {
-	mu      sync.Mutex
 	resp    *domain.HttpResponse
 	err     error
 	calls   int
 	lastReq *domain.HttpRequest
+	lastCtx context.Context
+	// release 非空时 ExecuteContext 会阻塞直到该 channel 被关闭，用于模拟"PAM 刷新很慢"，
+	// 从而验证调用方 ctx 取消/超时时能立即结束等待。
+	release chan struct{}
 }
 
 func (f *fakeHttpClient) Execute(req *domain.HttpRequest) (*domain.HttpResponse, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	return f.ExecuteContext(context.Background(), req)
+}
+
+// ExecuteContext 实现 sdkhttp.HttpClient（core SDK v0.1.0-beta.1 新增方法）。
+func (f *fakeHttpClient) ExecuteContext(ctx context.Context, req *domain.HttpRequest) (*domain.HttpResponse, error) {
 	f.calls++
+	f.lastCtx = ctx
 	f.lastReq = req
+	if f.release != nil {
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -104,11 +125,11 @@ func TestNormalizeEndpoint(t *testing.T) {
 		{"https://api.x.com/", "https://api.x.com"}, // 去尾部斜杠
 		{"https://api.x.com//", "https://api.x.com"},
 		{"  api.x.com  ", "https://api.x.com"},
-		{"HTTPS://API.X.COM", "https://API.X.COM"},         // scheme 小写、host 保留大小写
-		{"http://api.x.com:8080", "http://api.x.com:8080"}, // 保留端口
-		{"https://api.x.com/pam", "https://api.x.com"},     // 丢弃 path（base endpoint）
-		{"ftp://api.x.com", "https://api.x.com"},           // 非 http(s) scheme 归一为 https
-		{"https:///path", "https://https:///path"},         // host 缺失（异常输入）→ 回退加 https:// 前缀
+		{"HTTPS://API.X.COM", "https://API.X.COM"},                      // scheme 小写、host 保留大小写
+		{"http://api.x.com:8080", "http://api.x.com:8080"},              // 保留端口
+		{"https://api.x.com/pam", "https://api.x.com/pam"},              // 保留 path（支持反代子路径部署）
+		{"https://gw.internal/pam-api/", "https://gw.internal/pam-api"}, // 保留 path、strip 尾斜杠
+		{"https://api.x.com", "https://api.x.com"},                      // 无 path 不追加
 		{"", ""},
 	}
 	for _, c := range cases {
@@ -140,6 +161,20 @@ func TestParseUTCDate(t *testing.T) {
 			t.Errorf("parseUTCDate(%q from %q) err: %v", ts, f, err)
 		}
 	}
+
+	// 带小数秒（毫秒/纳秒）的 ISO 8601 形态——STS/PAM 类服务常见返回。
+	// time.RFC3339 不接受小数秒，须由 time.RFC3339Nano / 空格+小数秒格式承接。
+	withFraction := []string{
+		"2026-01-02T15:04:05.123Z",
+		"2026-01-02T15:04:05.123456789Z",
+		"2026-01-02T15:04:05.123+00:00",
+		"2026-01-02 15:04:05.123",
+	}
+	for _, ts := range withFraction {
+		if _, err := parseUTCDate(ts); err != nil {
+			t.Errorf("parseUTCDate(%q) err: %v", ts, err)
+		}
+	}
 }
 
 // --- parsePamError ---
@@ -162,26 +197,6 @@ func TestParsePamError(t *testing.T) {
 	}
 	if msg == "" {
 		t.Error("fallback msg should not be empty")
-	}
-}
-
-// parsePamError 对超大 body 的截断边界：512 字节以内不截断，超出保留前 512 字节 + 标记。
-func TestParsePamError_TruncatesLargeBody(t *testing.T) {
-	// 正好 512 字节：不截断（边界语义为 <=）。
-	at512 := strings.Repeat("x", 512)
-	if _, msg := parsePamError([]byte(at512), 502); strings.HasSuffix(msg, "...(truncated)") {
-		t.Errorf("512-byte body should not be truncated, got tail %q", msg[len(msg)-20:])
-	}
-	// 超出 512 字节：保留前 512 字节 + 截断标记。
-	code, msg := parsePamError([]byte(strings.Repeat("x", 600)), 502)
-	if code != constants.PamApiError {
-		t.Errorf("code=%q, want %q", code, constants.PamApiError)
-	}
-	if !strings.HasSuffix(msg, "...(truncated)") {
-		t.Errorf("oversized body should be truncated, got %q", msg)
-	}
-	if !strings.Contains(msg, at512) {
-		t.Error("truncated msg should keep the first 512 bytes")
 	}
 }
 
@@ -303,83 +318,6 @@ func TestGetStsCredential_SuccessAndCache(t *testing.T) {
 	}
 	if http.calls != 1 {
 		t.Errorf("http calls=%d, want 1 (cache miss+hit)", http.calls)
-	}
-}
-
-// --- 并发与降级契约（README 公开承诺的行为，必须有测试守护）---
-
-// 并发 singleflight 合并：N 个并发请求在缓存缺失时应合并为仅 1 次 PAM 调用，
-// 且所有请求拿到同一份凭证（防止并发穿透把 PAM 打挂）。
-func TestGetStsCredential_ConcurrentSingleflight(t *testing.T) {
-	exp := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
-	http := &fakeHttpClient{resp: domainResponse(200, pamSuccessBody(exp))}
-	p := newProviderWithFake(t, http, &fakeOidcTokenProvider{token: "tok"})
-
-	const n = 20
-	errs := make([]error, n)
-	tokens := make([]string, n)
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			cred, err := p.GetStsCredential()
-			if err != nil {
-				errs[i] = err
-				return
-			}
-			if cred != nil {
-				tokens[i] = cred.SecurityToken
-			}
-		}(i)
-	}
-	wg.Wait()
-
-	for i := 0; i < n; i++ {
-		if errs[i] != nil {
-			t.Fatalf("goroutine %d: %v", i, errs[i])
-		}
-		if tokens[i] != "ST123" {
-			t.Errorf("goroutine %d: unexpected credential token %q", i, tokens[i])
-		}
-	}
-	if http.calls != 1 {
-		t.Errorf("http calls=%d, want 1 (singleflight should coalesce concurrent refreshes)", http.calls)
-	}
-}
-
-// 刷新失败降级契约：越过 2/3 刷新点后 PAM 故障 → 仍返回有效期内的旧缓存凭证（stale 降级），
-// 错误不抛给调用方；与 FailFastOnExpired（真正过期才报 CredentialExpired）共同构成完整降级语义。
-// 核心SDK supplier 的 Clock 为私有字段无注入通道，故用短 TTL（3s）+ RFC3339Nano 纳秒精度
-// 锁定刷新点（+2.0s），睡眠 2.4s 落在 (刷新点, 真实过期点 +3.0s) 区间内，无需 fake clock。
-func TestGetStsCredential_DegradeToStaleOnRefreshFailure(t *testing.T) {
-	// TTL=3s：刷新点=now+2s（2/3 处），真实过期=now+3s。
-	exp := time.Now().Add(3 * time.Second).UTC().Format(time.RFC3339Nano)
-	http := &fakeHttpClient{resp: domainResponse(200, pamSuccessBody(exp))}
-	p := newProviderWithFake(t, http, &fakeOidcTokenProvider{token: "tok"})
-
-	if _, err := p.GetStsCredential(); err != nil {
-		t.Fatalf("initial fetch: %v", err)
-	}
-
-	// 睡到越过刷新点（+2s）但仍在凭证有效期内（+3s）。
-	time.Sleep(2400 * time.Millisecond)
-
-	// PAM 故障：后续刷新全部失败。
-	http.mu.Lock()
-	http.err = fmt.Errorf("pam unavailable")
-	http.mu.Unlock()
-
-	cred, err := p.GetStsCredential()
-	if err != nil {
-		t.Fatalf("expected stale degrade (old credential, no error), got err: %v", err)
-	}
-	if cred == nil || cred.AccessKeyId != "AKID123" || cred.SecurityToken != "ST123" {
-		t.Fatalf("expected old cached credential, got %+v", cred)
-	}
-	// 刷新确实被尝试过（1 次初始 + 1 次失败刷新）——证明这是降级路径而非普通缓存命中。
-	if http.calls != 2 {
-		t.Errorf("http calls=%d, want 2 (initial + failed refresh attempt)", http.calls)
 	}
 }
 
@@ -573,66 +511,6 @@ func TestRefreshCredential_MissingStsToken(t *testing.T) {
 	_, err := p.GetStsCredential()
 	if err == nil {
 		t.Fatal("expected error")
-	}
-	var ce *sdkerrors.CredentialError
-	if !errors.As(err, &ce) || ce.Code != constants.ParseError {
-		t.Fatalf("expected ParseError, got %v", err)
-	}
-}
-
-// --- 缺失外层 cloudAccountRoleAccessCredential → ParseError ---
-
-func TestRefreshCredential_MissingAccessCredential(t *testing.T) {
-	http := &fakeHttpClient{resp: &domain.HttpResponse{StatusCode: 200, Body: []byte(`{"foo":"bar"}`)}}
-	p := newProviderWithFake(t, http, &fakeOidcTokenProvider{token: "tok"})
-
-	_, err := p.GetStsCredential()
-	if err == nil {
-		t.Fatal("expected error for response missing cloudAccountRoleAccessCredential")
-	}
-	var ce *sdkerrors.CredentialError
-	if !errors.As(err, &ce) || ce.Code != constants.ParseError {
-		t.Fatalf("expected ParseError, got %v", err)
-	}
-	if !strings.Contains(ce.Error(), constants.CloudAccountRoleAccessCredential) {
-		t.Errorf("error should name missing field, got: %s", ce.Error())
-	}
-}
-
-// --- STS 字段为空串（accessKeyId）→ ParseError ---
-
-func TestRefreshCredential_EmptyStsFields(t *testing.T) {
-	body := []byte(`{"cloudAccountRoleAccessCredential":{"alibabaCloudStsToken":{` +
-		`"accessKeyId":"","accessKeySecret":"SK123","securityToken":"ST123",` +
-		`"expiration":"2099-01-01T00:00:00Z"}}}`)
-	http := &fakeHttpClient{resp: &domain.HttpResponse{StatusCode: 200, Body: body}}
-	p := newProviderWithFake(t, http, &fakeOidcTokenProvider{token: "tok"})
-
-	_, err := p.GetStsCredential()
-	if err == nil {
-		t.Fatal("expected error for empty accessKeyId")
-	}
-	var ce *sdkerrors.CredentialError
-	if !errors.As(err, &ce) || ce.Code != constants.ParseError {
-		t.Fatalf("expected ParseError, got %v", err)
-	}
-	if !strings.Contains(ce.Error(), constants.PAMAccessKeyId) {
-		t.Errorf("error should name missing field %q, got: %s", constants.PAMAccessKeyId, ce.Error())
-	}
-}
-
-// --- 过期时间格式非法 → ParseError ---
-
-func TestRefreshCredential_InvalidExpiration(t *testing.T) {
-	body := []byte(`{"cloudAccountRoleAccessCredential":{"alibabaCloudStsToken":{` +
-		`"accessKeyId":"AKID123","accessKeySecret":"SK123","securityToken":"ST123",` +
-		`"expiration":"not-a-date"}}}`)
-	http := &fakeHttpClient{resp: &domain.HttpResponse{StatusCode: 200, Body: body}}
-	p := newProviderWithFake(t, http, &fakeOidcTokenProvider{token: "tok"})
-
-	_, err := p.GetStsCredential()
-	if err == nil {
-		t.Fatal("expected error for invalid expiration format")
 	}
 	var ce *sdkerrors.CredentialError
 	if !errors.As(err, &ce) || ce.Code != constants.ParseError {

@@ -3,8 +3,8 @@
 # 跨平台编译 examples/ 目录下的所有示例程序
 #
 # 用法：
-#   ./scripts/build_examples_all.sh                                  # 编译所有示例 x 所有默认平台
-#   ./scripts/build_examples_all.sh akless_oss_v1_example            # 仅编译指定示例 x 所有默认平台
+#   ./scripts/build_examples_all.sh                       # 编译所有示例 x 所有默认平台
+#   ./scripts/build_examples_all.sh oss_demo              # 仅编译指定示例 x 所有默认平台
 #
 # 环境变量：
 #   OUTPUT_DIR  输出根目录，默认为 bin/

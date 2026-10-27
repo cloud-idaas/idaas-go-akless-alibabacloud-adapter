@@ -32,11 +32,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load IDaaS config: %v", err)
 	}
-	if err := factory.GetInstance().Initialize(idaasCfg); err != nil {
+	if err := factory.InitWithConfig(idaasCfg); err != nil {
 		log.Fatalf("Failed to initialize IDaaS: %v", err)
 	}
 
-	// 2. Create generic credentials provider via the package-level constructor.
+	// 2. Create generic credentials provider via factory.
 	credProvider, err := pam.GetAlibabaCloudCredentialsProvider(roleArn)
 	if err != nil {
 		log.Fatalf("Failed to create credentials provider: %v", err)

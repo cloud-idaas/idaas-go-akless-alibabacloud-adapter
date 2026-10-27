@@ -7,7 +7,7 @@ require (
 	github.com/aliyun/aliyun-log-go-sdk v0.1.75
 	github.com/aliyun/aliyun-oss-go-sdk v3.0.2+incompatible
 	github.com/aliyun/credentials-go v1.3.10
-	github.com/cloud-idaas/idaas-go-core-sdk v0.1.0-alpha.3
+	github.com/cloud-idaas/idaas-go-core-sdk v0.1.0-beta.1
 )
 
 require (

@@ -2,6 +2,7 @@ package pam
 
 import (
 	"github.com/cloud-idaas/idaas-go-core-sdk/http"
+	"github.com/cloud-idaas/idaas-go-core-sdk/logger"
 	"github.com/cloud-idaas/idaas-go-core-sdk/provider"
 )
 
@@ -24,6 +25,7 @@ type credentialsProviderConfig struct {
 	connectTimeout       int
 	readTimeout          int
 	httpClient           http.HttpClient // 未导出，仅用于测试注入 fake client
+	logger               logger.Logger   // 日志实现；未注入时构造器回退 logger.Default()
 	preflight            bool            // 构造期预检：立即换取一次 STS 验证链路，失败 fail-fast
 }
 
@@ -48,7 +50,8 @@ func WithOidcTokenProvider(p provider.OidcTokenProvider) CredentialsProviderOpti
 // 端点会被 normalizeEndpoint 规范化（与 Python 适配层 urlparse 语义对齐）：
 // 去除前后空白与尾部斜杠；已带 http:// 或 https:// 则保留该 scheme（不强制升级），
 // 无协议前缀时默认补 https://。显式声明 http:// 的内网/开发环境不会被改写；
-// 是否让 Bearer Token 走明文由调用方自负。
+// 是否让 Bearer Token 走明文由调用方自负。path 部分保留（支持 PAM 部署在反向
+// 代理子路径下）；query/fragment 不属于端点语义，会被丢弃。
 func WithDeveloperApiEndpoint(endpoint string) CredentialsProviderOption {
 	return func(c *credentialsProviderConfig) {
 		c.developerApiEndpoint = endpoint
@@ -97,10 +100,28 @@ func withHttpClient(h http.HttpClient) CredentialsProviderOption {
 // role 未授权、端点错误等）延迟到首次业务请求才暴露。
 //
 // 注意：启用后构造函数会执行一次网络调用，默认不启用（遵循"构造期不做网络 IO"原则）。
-// 推荐在 OSS V1 场景下启用——OSS V1 SDK 的部分调用点（conn.go:499）走无 error 返回的
-// GetCredentials()，错误会被降级为空凭证 + 告警日志，预检可把这些错误前移到初始化阶段。
+// 推荐在 OSS V1 场景下启用——OSS V1 SDK 的部分调用点（conn.go 的凭证获取路径）走无
+// error 返回的 GetCredentials()，错误会被降级为空凭证 + 告警日志，预检可把这些错误前
+// 移到初始化阶段。
 func WithPreflight() CredentialsProviderOption {
 	return func(c *credentialsProviderConfig) {
 		c.preflight = true
+	}
+}
+
+// WithLogger 注入日志实现，接收核心 SDK 的 logger.Logger 接口。
+//
+// 未注入时构造器回退 logger.Default()（一次性的 stderr 提示），与核心 SDK
+// factory.effectiveLogger() 的回退口径一致。生产环境应通过本选项或进程级
+// logger.SetDefault 注入真实实现：否则刷新失败降级告警（refreshCredential defer）
+// 与 OSS V1 GetCredentials 失败告警只会向 stderr 打一次后静默，PAM 中断将
+// 退化为只能从下游业务 403 反推。传入 nil 等同于不调用（使用 Default）。
+//
+// 走核心 SDK logger 包而非 log/slog，与核心 SDK 的 logger 抽象保持一致（并非受工具链下限约束）。
+func WithLogger(l logger.Logger) CredentialsProviderOption {
+	return func(c *credentialsProviderConfig) {
+		if l != nil {
+			c.logger = l
+		}
 	}
 }

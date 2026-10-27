@@ -6,7 +6,7 @@
 // 默认跳过（不打扰常规 `go test ./...` 与 CI），仅在显式开启时运行：
 //
 //	IDAAS_INTEGRATION=on \
-//	IDAAS_ROLE_ARN="acs:ram::<uid>:role/<name>" \
+//	ALIBABA_CLOUD_ROLE_ARN="acs:ram::<uid>:role/<name>" \
 //	go test -tags=integration ./pam/ -run TestIntegration -v -timeout 10m
 //
 // 必需配置（缺失时给出明确报错提示）：
@@ -15,7 +15,9 @@
 //     "urn:cloud:idaas:pam|cloud_account_role:obtain_access_credential"（参考 samples/cloud_idaas.json）。
 //   - IDAAS_CLIENT_SECRET 环境变量：client 密钥
 //     （对应配置项 authnConfiguration.clientSecretEnvVarName）。
-//   - IDAAS_ROLE_ARN 环境变量：PAM 云账号角色外部 ID，如 acs:ram::<uid>:role/<name>。
+//   - ALIBABA_CLOUD_ROLE_ARN 环境变量：PAM 云账号角色外部 ID，如 acs:ram::<uid>:role/<name>。
+//     （兼容旧名 IDAAS_ROLE_ARN；examples/ 与 CHANGELOG 已统一为 ALIBABA_CLOUD_ROLE_ARN，
+//     此处优先读新名、回退旧名，避免用户按 examples 设变量后跑集成测试被卡。）
 //
 // 可选配置（控制 OSS/SLS 用例的运行模式，未设置时退化为探测模式）：
 //   - OSS_BUCKET（可选 OSS_ENDPOINT / OSS_REGION，默认 cn-hangzhou）：设置后对指定
@@ -29,7 +31,9 @@ package pam
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -86,10 +90,14 @@ func requireIntegration(t *testing.T) string {
 		t.Skip("integration tests disabled; set IDAAS_INTEGRATION=on and run with -tags=integration")
 	}
 
-	roleArn := os.Getenv("IDAAS_ROLE_ARN")
+	// 优先读 examples/CHANGELOG 统一的 ALIBABA_CLOUD_ROLE_ARN，回退旧名 IDAAS_ROLE_ARN。
+	roleArn := os.Getenv("ALIBABA_CLOUD_ROLE_ARN")
 	if roleArn == "" {
-		t.Fatal("IDAAS_ROLE_ARN is required when IDAAS_INTEGRATION=on " +
-			"(cloud account role external id, e.g. acs:ram::<uid>:role/<name>)")
+		roleArn = os.Getenv("IDAAS_ROLE_ARN")
+	}
+	if roleArn == "" {
+		t.Fatal("ALIBABA_CLOUD_ROLE_ARN (or legacy IDAAS_ROLE_ARN) is required when " +
+			"IDAAS_INTEGRATION=on (cloud account role external id, e.g. acs:ram::<uid>:role/<name>)")
 	}
 
 	// 加载真实 IDaaS 配置，优先级：CLOUD_IDAAS_CONFIG_PATH 环境变量 > 仓库根目录
@@ -105,8 +113,8 @@ func requireIntegration(t *testing.T) string {
 			"and export IDAAS_CLIENT_SECRET if the config reads the secret from env", configPath, err)
 	}
 
-	// Initialize 可重复调用：即使同包单元测试初始化过 fake 配置，这里也会用真实配置重建。
-	if err := factory.GetInstance().Initialize(cfg); err != nil {
+	// InitWithConfig 可重复调用：即使同包单元测试初始化过 fake 配置，这里也会用真实配置重建。
+	if err := factory.InitWithConfig(cfg); err != nil {
 		t.Fatalf("failed to initialize IDaaS core factory: %v", err)
 	}
 	return roleArn
@@ -118,6 +126,21 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// redactAK 把 AccessKeyId 脱敏为"前缀 + 长度 + SHA256 前 8 位"，对齐核心 SDK
+// IDaaSCredential.String 的口径：可定位又不泄露原文，避免 AK 片段进入测试日志。
+// （此前用 minInt 截前 8/9 字符前缀，仍属敏感信息泄漏，改为哈希脱敏。）
+func redactAK(ak string) string {
+	if ak == "" {
+		return "(empty)"
+	}
+	prefix := ak
+	if len(prefix) > 4 {
+		prefix = prefix[:4]
+	}
+	h := sha256.Sum256([]byte(ak))
+	return fmt.Sprintf("%s**(len=%d, sha256=%x)", prefix, len(ak), h[:4])
 }
 
 // isOssAuthorizedButDenied 判断 OSS 错误是否为“请求已通过签名认证、仅被 RAM 策略拒绝”。
@@ -161,7 +184,7 @@ func TestIntegration_GenericProvider_GetCredential(t *testing.T) {
 	if model.AccessKeyId == nil || *model.AccessKeyId == "" {
 		t.Error("AccessKeyId is empty")
 	} else {
-		t.Logf("AccessKeyId: %s...", (*model.AccessKeyId)[:min(8, len(*model.AccessKeyId))])
+		t.Logf("AccessKeyId: %s", redactAK(*model.AccessKeyId))
 	}
 	if model.AccessKeySecret == nil || *model.AccessKeySecret == "" {
 		t.Error("AccessKeySecret is empty")
@@ -257,17 +280,17 @@ func TestIntegration_InvalidRoleArn_Error(t *testing.T) {
 func TestIntegration_FullArgOverload(t *testing.T) {
 	roleArn := requireIntegration(t)
 
-	f := factory.GetInstance()
-	cfg := f.GetConfig()
-	credProvider, err := f.CreateCredentialProvider()
+	// 走核心 SDK 包级稳定 API（GetIDaaSCredentialProvider / GetDeveloperApiEndpoint /
+	// GetIDaaSInstanceId），不依赖已 Deprecated 的 GetInstance / CreateCredentialProvider。
+	credProvider, err := factory.GetIDaaSCredentialProvider()
 	if err != nil {
-		t.Fatalf("CreateCredentialProvider: %v", err)
+		t.Fatalf("GetIDaaSCredentialProvider: %v", err)
 	}
 
 	provider, err := NewIDaaSPamAlibabaCloudCredentialsProvider(
 		WithCredentialProvider(credProvider),
-		WithDeveloperApiEndpoint(cfg.DeveloperApiEndpoint),
-		WithIdaasInstanceId(cfg.InstanceId),
+		WithDeveloperApiEndpoint(factory.GetDeveloperApiEndpoint()),
+		WithIdaasInstanceId(factory.GetIDaaSInstanceId()),
 		WithRoleArn(roleArn),
 	)
 	if err != nil {
@@ -307,8 +330,8 @@ func TestIntegration_RoleArnEnvFallback(t *testing.T) {
 	if sts.AccessKeyId == "" || sts.SecurityToken == "" {
 		t.Fatalf("unexpected empty credential fields: %+v", sts)
 	}
-	t.Logf("env fallback OK: roleArn from %s, STS AccessKeyId=%s...",
-		constants.RoleArnEnvVar, sts.AccessKeyId[:min(9, len(sts.AccessKeyId))])
+	t.Logf("env fallback OK: roleArn from %s, STS AccessKeyId=%s",
+		constants.RoleArnEnvVar, redactAK(sts.AccessKeyId))
 }
 
 // TestIntegration_ExplicitRoleArnPrecedence 验证显式 roleArn 优先于环境变量：

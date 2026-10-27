@@ -24,8 +24,11 @@ func NewIDaaSPamOSSV2CredentialsProvider(p *IDaaSPamAlibabaCloudCredentialsProvi
 }
 
 // GetCredentials 实现 credentials.CredentialsProvider。
-func (p *IDaaSPamOSSV2CredentialsProvider) GetCredentials(_ context.Context) (credentials.Credentials, error) {
-	cred, err := p.provider.GetStsCredential()
+//
+// OSS V2 传入的 ctx 透传给底层 provider：ctx 取消 / 超时时立即结束对凭证刷新的等待
+// （见 GetStsCredentialWithContext），不再阻塞 OSS 请求线程。
+func (p *IDaaSPamOSSV2CredentialsProvider) GetCredentials(ctx context.Context) (credentials.Credentials, error) {
+	cred, err := p.provider.GetStsCredentialWithContext(ctx)
 	if err != nil {
 		return credentials.Credentials{}, err
 	}
